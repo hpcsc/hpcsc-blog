@@ -38,7 +38,7 @@ Before diving into actual coding, we need to plan how the custom resource is goi
 - `owner`, `repo`, `description`: github owner, name and description of the repository to be created
 - `templateOwner`, `templateRepo`: (optional) owner and repository name of a template repository to clone from
 
-```
+```yaml
 apiVersion: "pnguyen.io/v1"
 kind: GithubRepository
 metadata:
@@ -52,6 +52,7 @@ spec:
 ```
 
 Some requirements:
+
 - `owner` and `repo` cannot be changed after created the first time. We need some validation to enforce this
 - `templateOwner` and `templateRepo` are only used during creation and ignored during update
 
@@ -62,7 +63,7 @@ Some requirements:
 We are going to use [Operator SDK](https://github.com/operator-framework/operator-sdk) version 1.8.1
 Let's scaffold the project directory:
 
-```
+```shell
 mkdir github-repository-operator
 cd github-repository-operator
 operator-sdk init --domain pnguyen.io --repo github.com/hpcsc/github-repository-operator
@@ -70,7 +71,7 @@ operator-sdk init --domain pnguyen.io --repo github.com/hpcsc/github-repository-
 
 And generate skeleton for our controller
 
-```
+```shell
 operator-sdk create api --group pnguyen.io --version v1 --kind GithubRepository --resource --controller
 ```
 
@@ -93,7 +94,7 @@ The operator needs to interacts with Github API. For quick feedback and safer lo
 
 Let's add a Make task and script to start smocker docker container in the background:
 
-```
+```shell
 SMOCKER_VERSION=0.16.2
 CONTAINER_NAME=fake-github
 
@@ -132,7 +133,7 @@ We will follow outside-in TDD and start with an end to end test to verify that w
 
 The skeleton of end to end test (in Ginkgo) is already created for us at `controllers/suite_test.go`. Let's modify the `BeforeSuite` to add in this code at the end:
 
-```
+```go
 logf.Log.Info("Creating new manager")
 mgr, err := ctrl.NewManager(cfg, ctrl.Options{
   Scheme: scheme.Scheme,
@@ -168,7 +169,7 @@ The initial code starts [EnvTest](https://sdk.operatorframework.io/docs/building
 
 Now the setup and teardown are propertly wired up, let's add the first test:
 
-```
+```go
 var _ = Describe("GithubRepository Controller", func() {
 	Context("When GithubRepository resource created", func() {
 		var name, namespace string
@@ -220,7 +221,7 @@ this test uses kubernetes client to create a `GithubRepository` custom resource.
 
 - The custom resource status is updated to successful after reconcillation. This is verified by these 2 lines:
 
-  ```
+  ```go
   err = waitUntilSuccessful(name, namespace)
   Expect(err).NotTo(HaveOccurred())
   ```
@@ -229,7 +230,7 @@ this test uses kubernetes client to create a `GithubRepository` custom resource.
 
 We can already see that the test is not compilable becuse `GithubRepositorySpec` and `GithubRepositoryStatus` do not contain the fields we want in the test. Let's quickly go to `api/v1/githubrepository_types.go` and add those in:
 
-```
+```go
 type GithubRepositorySpec struct {
 	Owner         string `json:"owner"`
 	Repo          string `json:"repo"`
@@ -249,7 +250,7 @@ Now run the test with `make test` and it should fail with below error:
 
 The simplest way to fix above error is to just update the status to successful without doing anything:
 
-```
+```go
 func (r *GithubRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -276,13 +277,14 @@ The test should fail with 2nd error message:
 
 To fix it, we need to invoke Github API to create repository. We will use [Go Github](https://github.com/google/go-github) for that:
 
-```
+```shell
 go get github.com/google/go-github/v37
 ```
 
 the logic to call github API does not belong to controller reconcillation function and should have its own package.
 
 There are several ways to design the new package:
+
 - It can be a package that is specific to github api. Client of this package will explicitly call function like: `github.CreateRepository()`, `github.DeleteRepository()` etc. It's simpler but client's tied to this specific implementation.
 - Or it can be a general package like `repository` with an exposed contract/interface to the client. Github is only an implementation. Other possible implementations are gitlab, bitbucket etc (assuming all of them having similar apis that we need). This is a bit more future-proof and flexile, with the cost of more abstraction and complexity. Another minor disadvantage is that we need to rename our project and controller since it is no longer specific to github.
 
@@ -297,7 +299,7 @@ Tests for this new package are going to be integration tests. Integration is an 
 
 I find it easier to start with a negative test case: return authorization error when we don't provide token. This is a possible error returned from github api. We actually don't care what error returned, as long as it's returned by `CreateRepository()`, so any error works:
 
-```
+```go
 func TestCreateRepository(t *testing.T) {
 	t.Run("return error when failed to create repository", func(t *testing.T) {
 		baseUrl := "http://localhost:8088"
@@ -315,7 +317,7 @@ func TestCreateRepository(t *testing.T) {
 
 To make it pass, we need to add a smocker definition file at `local/smocker/no-token-error.yaml`:
 
-```
+```yaml
 - request:
     path: /api/v3/user/repos
     method: POST
@@ -331,7 +333,7 @@ To make it pass, we need to add a smocker definition file at `local/smocker/no-t
 
 and implement the code:
 
-```
+```go
 type api struct {
 	ctx       context.Context
 	baseUrl   string
@@ -373,7 +375,7 @@ func New(ctx context.Context, baseUrl, uploadUrl, token string) *api {
 
 next test is to verify happy path. We need a way to verify that smocker is called with POST request to create the repository. This is similar to what we did in the end to end test. So before creating this test, we need to move the utility functions to verify smocker call to an internal package `smocker`. It's not ideal to create a package for something that is used only in test, but I can't find a better way to share test utility in golang. After moving the smocker utility to new package, we can write the new test:
 
-```
+```go
 t.Run("invoke github api when repository created", func(t *testing.T) {
 	baseUrl := "http://localhost:8088"
 	uploadUrl := "http://localhost:8088"
@@ -393,7 +395,7 @@ t.Run("invoke github api when repository created", func(t *testing.T) {
 
 add another mock definition file to make it pass: this mock matches on `Authorization` header with `valid-token` value and uses dynamic response to return the same repo name from request in the body. The body is only partial response from Github API.
 
-```
+```yaml
 - request:
     path: /api/v3/user/repos
     method: POST
@@ -416,7 +418,7 @@ add another mock definition file to make it pass: this mock matches on `Authoriz
 
 Last thing, for now we only focus on creation, so we don't want to call github API creation endpoint again if the repo already exists (the api will return an error). So we should do a check before making creation request. We will update this test when we work on update repository.
 
-```
+```go
 t.Run("not invoke github api creation when repository exists", func(t *testing.T) {
 	baseUrl := "http://localhost:8088"
 	uploadUrl := "http://localhost:8088"
@@ -435,7 +437,7 @@ t.Run("not invoke github api creation when repository exists", func(t *testing.T
 
 and implementation:
 
-```
+```go
 func (a *api) CreateRepository(owner, repo, description string) error {
 	// ...
 
@@ -455,7 +457,7 @@ func (a *api) CreateRepository(owner, repo, description string) error {
 
 `githubapi` package is done, now just need to use it in controller:
 
-```
+```go
 baseUrl := getEnv(GithubApiBaseUrlKey, "https://api.github.com/")
 uploadUrl := getEnv(GithubApiUploadUrlKey, "https://uploads.github.com/")
 token := os.Getenv(GithubApiTokenKey)
